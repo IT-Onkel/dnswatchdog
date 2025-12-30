@@ -43,7 +43,7 @@ DIG_BIN=""
 SS_BIN=""
 RUN_ID="$(date +%s)"
 
-# Window vars (avoid set -u surprises)
+# Window vars
 dnssec_note=""
 l_ok=0; l_to=0; l_sf=0; l_nx=0; l_rf=0; l_err=0; l_unk=0
 u_ok=0; u_to=0; u_sf=0; u_nx=0; u_rf=0; u_err=0; u_unk=0
@@ -110,7 +110,6 @@ port53_listening_udp() {
 }
 
 # returns: TOKEN qtime_ms=.. status=..
-# IMPORTANT: Must never fail under set -euo pipefail.
 dns_query() {
   local resolver="$1" domain="$2" rrtype="${3:-A}" extra="${4:-}"
 
@@ -123,7 +122,6 @@ dns_query() {
   status="$(sed -n 's/.* status: \([A-Z]*\).*/\1/p' <<<"$out" | head -n1 || true)"
   qtime="$(awk '/^;; Query time:/{print $4; exit}' <<<"$out" 2>/dev/null || true)"
 
-  # Timeouts often show as text, sometimes rc=0
   if grep -qiE 'connection timed out|no servers could be reached' <<<"$out"; then
     echo "TIMEOUT qtime_ms=${qtime:-NA} status=${status:-NA}"
     return 0
@@ -163,20 +161,20 @@ reset_window() {
 inc_counter() {
   local scope="$1" token="$2"
   case "$scope:$token" in
-    local:OK) ((l_ok++));;
-    local:TIMEOUT) ((l_to++));;
-    local:SERVFAIL) ((l_sf++));;
-    local:NXDOMAIN) ((l_nx++));;
-    local:REFUSED) ((l_rf++));;
-    local:ERROR) ((l_err++));;
-    local:UNKNOWN) ((l_unk++));;
-    upstream:OK) ((u_ok++));;
-    upstream:TIMEOUT) ((u_to++));;
-    upstream:SERVFAIL) ((u_sf++));;
-    upstream:NXDOMAIN) ((u_nx++));;
-    upstream:REFUSED) ((u_rf++));;
-    upstream:ERROR) ((u_err++));;
-    upstream:UNKNOWN) ((u_unk++));;
+    local:OK)      ((l_ok+=1)) ;;
+    local:TIMEOUT) ((l_to+=1)) ;;
+    local:SERVFAIL)((l_sf+=1)) ;;
+    local:NXDOMAIN)((l_nx+=1)) ;;
+    local:REFUSED) ((l_rf+=1)) ;;
+    local:ERROR)   ((l_err+=1)) ;;
+    local:UNKNOWN) ((l_unk+=1)) ;;
+    upstream:OK)      ((u_ok+=1)) ;;
+    upstream:TIMEOUT) ((u_to+=1)) ;;
+    upstream:SERVFAIL)((u_sf+=1)) ;;
+    upstream:NXDOMAIN)((u_nx+=1)) ;;
+    upstream:REFUSED) ((u_rf+=1)) ;;
+    upstream:ERROR)   ((u_err+=1)) ;;
+    upstream:UNKNOWN) ((u_unk+=1)) ;;
   esac
 }
 
@@ -186,7 +184,7 @@ run_and_log() {
   r="$(dns_query "$resolver" "$domain" "$rr" "$extra")"
   token="$(awk '{print $1}' <<<"$r" 2>/dev/null || echo "UNKNOWN")"
   inc_counter "$scope" "$token"
-  ((tests_run++))
+  ((tests_run+=1))
   log_detail "RUN=${RUN_ID} scope=${scope} resolver=${resolver} domain=${domain} rr=${rr} result=\"${r}\""
 }
 
@@ -213,11 +211,10 @@ while [[ "$stop_requested" -eq 0 ]]; do
     dnsmasq_state="$(svc_status_dnsmasq)"
     listen53="$(port53_listening_udp)"
     nxdomain_test="this-should-not-exist-${now}.invalid"
-    ((batches_run++))
+    ((batches_run+=1))
 
     log_detail "RUN=${RUN_ID} BATCH_START dnsmasq_state=${dnsmasq_state} port53_udp=${listen53} batch=${batches_run}"
 
-    # Local via dnsmasq
     for d in "${TEST_DOMAINS[@]}"; do
       run_and_log "local" "$LOCAL_DNS" "$d" "A"
       if [[ "$DO_AAAA_TESTS" == "true" ]]; then
@@ -225,11 +222,9 @@ while [[ "$stop_requested" -eq 0 ]]; do
       fi
     done
 
-    # Sanity
     run_and_log "local" "$LOCAL_DNS" "." "NS"
     run_and_log "local" "$LOCAL_DNS" "$nxdomain_test" "A"
 
-    # Upstream reference
     for up in "${UPSTREAM_DNS[@]}"; do
       for d in "${TEST_DOMAINS[@]}"; do
         run_and_log "upstream" "$up" "$d" "A"
