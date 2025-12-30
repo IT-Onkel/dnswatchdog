@@ -115,8 +115,7 @@ dns_query() {
 
   local out rc status qtime ans_cnt
   rc=0
-  out="$("$DIG_BIN" @"$resolver" "$domain" "$rrtype" \
-    +tries="$DIG_TRIES" +time="$DIG_TIMEOUT_SEC" +stats +nocmd +noquestion +nocomments $extra 2>&1)" || rc=$?
+  out="$("$DIG_BIN" @"$resolver" "$domain" "$rrtype" +tries="$DIG_TRIES" +time="$DIG_TIMEOUT_SEC" +stats +nocmd +noquestion $extra 2>&1)" || rc=$?
 
   # Timeout text patterns (dig sometimes returns rc=0 but prints timeout)
   if grep -qiE 'connection timed out|no servers could be reached' <<<"$out"; then
