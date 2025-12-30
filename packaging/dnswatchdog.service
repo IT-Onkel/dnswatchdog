@@ -9,6 +9,8 @@ ExecStart=@@RUNNER@@
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

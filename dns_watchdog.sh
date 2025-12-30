@@ -43,9 +43,16 @@ DIG_BIN=""
 SS_BIN=""
 RUN_ID="$(date +%s)"
 
+# Window vars (avoid set -u surprises)
+dnssec_note=""
+l_ok=0; l_to=0; l_sf=0; l_nx=0; l_rf=0; l_err=0; l_unk=0
+u_ok=0; u_to=0; u_sf=0; u_nx=0; u_rf=0; u_err=0; u_unk=0
+tests_run=0
+batches_run=0
+
 ts() { date -Is; }
-log_detail() { printf "%s %s\n" "$(ts)" "$1" >> "$DETAIL_LOG"; }
-log_summary() { printf "%s %s\n" "$(ts)" "$1" >> "$SUMMARY_LOG"; }
+log_detail() { printf '%s %s\n' "$(ts)" "$1" >> "$DETAIL_LOG"; }
+log_summary() { printf '%s %s\n' "$(ts)" "$1" >> "$SUMMARY_LOG"; }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 is_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]]; }
@@ -62,28 +69,20 @@ ensure_deps_debian() {
     if is_root; then
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y >/dev/null 2>&1 || true
-      apt-get install -y dnsutils >/dev/null 2>&1 \
-        && log_detail "INSTALL mgr=apt pkg=dnsutils result=OK" \
-        || log_detail "INSTALL mgr=apt pkg=dnsutils result=FAIL"
-    else
-      log_detail "INSTALL mgr=apt pkg=dnsutils result=SKIPPED(not_root)"
+      apt-get install -y dnsutils >/dev/null 2>&1 || true
+      resolve_tools
     fi
   fi
 
-  resolve_tools
   if [[ -z "$SS_BIN" ]]; then
     if is_root; then
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y >/dev/null 2>&1 || true
-      apt-get install -y iproute2 >/dev/null 2>&1 \
-        && log_detail "INSTALL mgr=apt pkg=iproute2 result=OK" \
-        || log_detail "INSTALL mgr=apt pkg=iproute2 result=FAIL"
-    else
-      log_detail "INSTALL mgr=apt pkg=iproute2 result=SKIPPED(not_root)"
+      apt-get install -y iproute2 >/dev/null 2>&1 || true
+      resolve_tools
     fi
   fi
 
-  resolve_tools
   if [[ -z "$DIG_BIN" ]]; then
     echo "ERROR: dig fehlt weiterhin. Installiere 'dnsutils'." >&2
     exit 1
@@ -99,14 +98,19 @@ svc_status_dnsmasq() {
 }
 
 port53_listening_udp() {
-  if [[ -n "$SS_BIN" ]]; then
-    ss -lpun 2>/dev/null | grep -qE ':(53)\s' && echo "yes" || echo "no"
+  if [[ -n "${SS_BIN:-}" ]]; then
+    if ss -lpun 2>/dev/null | grep -qE ':(53)\s'; then
+      echo "yes"
+    else
+      echo "no"
+    fi
   else
     echo "unknown"
   fi
 }
 
 # returns: TOKEN qtime_ms=.. status=..
+# IMPORTANT: Must never fail under set -euo pipefail.
 dns_query() {
   local resolver="$1" domain="$2" rrtype="${3:-A}" extra="${4:-}"
 
@@ -115,13 +119,16 @@ dns_query() {
   out="$("$DIG_BIN" @"$resolver" "$domain" "$rrtype" \
     +tries="$DIG_TRIES" +time="$DIG_TIMEOUT_SEC" +stats +nocmd +noquestion +nocomments $extra 2>&1)" || rc=$?
 
-  status="$(grep -m1 -E '^;; ->>HEADER<<-' <<<"$out" | sed -n 's/.* status: \([A-Z]*\).*/\1/p' || true)"
-  qtime="$(grep -m1 -E '^;; Query time:' <<<"$out" | awk '{print $4}' || true)"
+  # Parsing without pipefail traps
+  status="$(sed -n 's/.* status: \([A-Z]*\).*/\1/p' <<<"$out" | head -n1 || true)"
+  qtime="$(awk '/^;; Query time:/{print $4; exit}' <<<"$out" 2>/dev/null || true)"
 
+  # Timeouts often show as text, sometimes rc=0
   if grep -qiE 'connection timed out|no servers could be reached' <<<"$out"; then
     echo "TIMEOUT qtime_ms=${qtime:-NA} status=${status:-NA}"
     return 0
   fi
+
   if [[ "$rc" -ne 0 ]]; then
     echo "ERROR rc=${rc} qtime_ms=${qtime:-NA} status=${status:-NA}"
     return 0
@@ -146,13 +153,13 @@ dnssec_note_local() {
   fi
 }
 
-# Rolling 5-min window counters
 reset_window() {
   l_ok=0; l_to=0; l_sf=0; l_nx=0; l_rf=0; l_err=0; l_unk=0
   u_ok=0; u_to=0; u_sf=0; u_nx=0; u_rf=0; u_err=0; u_unk=0
   tests_run=0
   batches_run=0
 }
+
 inc_counter() {
   local scope="$1" token="$2"
   case "$scope:$token" in
@@ -177,7 +184,7 @@ run_and_log() {
   local scope="$1" resolver="$2" domain="$3" rr="$4" extra="${5:-}"
   local r token
   r="$(dns_query "$resolver" "$domain" "$rr" "$extra")"
-  token="$(awk '{print $1}' <<<"$r")"
+  token="$(awk '{print $1}' <<<"$r" 2>/dev/null || echo "UNKNOWN")"
   inc_counter "$scope" "$token"
   ((tests_run++))
   log_detail "RUN=${RUN_ID} scope=${scope} resolver=${resolver} domain=${domain} rr=${rr} result=\"${r}\""
@@ -202,7 +209,6 @@ log_summary "RUN=${RUN_ID} START local_dns=${LOCAL_DNS} test_interval=${TEST_INT
 while [[ "$stop_requested" -eq 0 ]]; do
   now="$(date +%s)"
 
-  # run test batch every 20s
   if (( now >= next_test_ts )); then
     dnsmasq_state="$(svc_status_dnsmasq)"
     listen53="$(port53_listening_udp)"
@@ -211,7 +217,7 @@ while [[ "$stop_requested" -eq 0 ]]; do
 
     log_detail "RUN=${RUN_ID} BATCH_START dnsmasq_state=${dnsmasq_state} port53_udp=${listen53} batch=${batches_run}"
 
-    # Local (dnsmasq): A/AAAA for multiple domains
+    # Local via dnsmasq
     for d in "${TEST_DOMAINS[@]}"; do
       run_and_log "local" "$LOCAL_DNS" "$d" "A"
       if [[ "$DO_AAAA_TESTS" == "true" ]]; then
@@ -219,11 +225,11 @@ while [[ "$stop_requested" -eq 0 ]]; do
       fi
     done
 
-    # Sanity: root NS, plus NXDOMAIN negative test
+    # Sanity
     run_and_log "local" "$LOCAL_DNS" "." "NS"
     run_and_log "local" "$LOCAL_DNS" "$nxdomain_test" "A"
 
-    # Upstream direct reference tests: A/AAAA + root NS
+    # Upstream reference
     for up in "${UPSTREAM_DNS[@]}"; do
       for d in "${TEST_DOMAINS[@]}"; do
         run_and_log "upstream" "$up" "$d" "A"
@@ -243,14 +249,14 @@ while [[ "$stop_requested" -eq 0 ]]; do
     next_test_ts=$(( now + TEST_INTERVAL_SEC ))
   fi
 
-  # Summary every 5 minutes
   if (( now - last_summary_ts >= SUMMARY_INTERVAL_SEC )); then
     dnsmasq_state="$(svc_status_dnsmasq)"
     listen53="$(port53_listening_udp)"
     window_sec=$(( now - last_summary_ts ))
-    dnssec_note=""
     if [[ "$DO_DNSSEC_NOTE" == "true" ]]; then
       dnssec_note="$(dnssec_note_local)"
+    else
+      dnssec_note=""
     fi
 
     log_summary "RUN=${RUN_ID} SUMMARY window=${window_sec}s batches=${batches_run} tests=${tests_run} dnsmasq_state=${dnsmasq_state} port53_udp=${listen53} ${dnssec_note} | local ok=${l_ok} timeout=${l_to} servfail=${l_sf} nxdomain=${l_nx} refused=${l_rf} error=${l_err} unknown=${l_unk} | upstream ok=${u_ok} timeout=${u_to} servfail=${u_sf} nxdomain=${u_nx} refused=${u_rf} error=${u_err} unknown=${u_unk}"

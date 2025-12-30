@@ -30,7 +30,8 @@ require_files_present() {
 
 install_deps_debian() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
+  # apt update kann bei kaputten Fremd-Repos scheitern -> nicht fatal
+  apt-get update -y || true
   apt-get install -y dnsutils iproute2
 }
 
@@ -38,7 +39,6 @@ install_files() {
   mkdir -p "${INSTALL_DIR}"
   install -m 0755 "${SRC_SCRIPT}" "${INSTALL_DIR}/${SRC_SCRIPT}"
 
-  # Runner
   cat > "${RUNNER}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -46,7 +46,6 @@ exec "${INSTALL_DIR}/${SRC_SCRIPT}"
 EOF
   chmod 0755 "${RUNNER}"
 
-  # Control command: dnswatchdog start/stop/status/logs
   cat > "${CTL}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -91,14 +90,14 @@ install_logs() {
   chmod 0644 "${DETAIL_LOG}" "${SUMMARY_LOG}"
 }
 
+install_logrotate() {
+  install -m 0644 "${LOGROTATE_TEMPLATE}" "${LOGROTATE_DST}"
+}
+
 install_systemd() {
   sed "s|@@RUNNER@@|${RUNNER}|g" "${SERVICE_TEMPLATE}" > "${SYSTEMD_UNIT}"
   systemctl daemon-reload
   systemctl enable --now "${APP_NAME}.service"
-}
-
-install_logrotate() {
-  install -m 0644 "${LOGROTATE_TEMPLATE}" "${LOGROTATE_DST}"
 }
 
 uninstall_all() {
