@@ -113,33 +113,48 @@ port53_listening_udp() {
 dns_query() {
   local resolver="$1" domain="$2" rrtype="${3:-A}" extra="${4:-}"
 
-  local out rc status qtime
+  local out rc status qtime ans_cnt
   rc=0
   out="$("$DIG_BIN" @"$resolver" "$domain" "$rrtype" \
     +tries="$DIG_TRIES" +time="$DIG_TIMEOUT_SEC" +stats +nocmd +noquestion +nocomments $extra 2>&1)" || rc=$?
 
-  # Parsing without pipefail traps
-  status="$(sed -n 's/.* status: \([A-Z]*\).*/\1/p' <<<"$out" | head -n1 || true)"
-  qtime="$(awk '/^;; Query time:/{print $4; exit}' <<<"$out" 2>/dev/null || true)"
-
+  # Timeout text patterns (dig sometimes returns rc=0 but prints timeout)
   if grep -qiE 'connection timed out|no servers could be reached' <<<"$out"; then
-    echo "TIMEOUT qtime_ms=${qtime:-NA} status=${status:-NA}"
+    qtime="$(awk '/^;; Query time:/{print $4; exit}' <<<"$out" 2>/dev/null || true)"
+    echo "TIMEOUT qtime_ms=${qtime:-NA} status=NA"
     return 0
   fi
 
   if [[ "$rc" -ne 0 ]]; then
+    qtime="$(awk '/^;; Query time:/{print $4; exit}' <<<"$out" 2>/dev/null || true)"
+    status="$(sed -n 's/.* status: \([A-Z]*\).*/\1/p' <<<"$out" | head -n1 || true)"
     echo "ERROR rc=${rc} qtime_ms=${qtime:-NA} status=${status:-NA}"
     return 0
   fi
 
+  # Extract status (if present) and answer count (more robust)
+  status="$(sed -n 's/.* status: \([A-Z]*\).*/\1/p' <<<"$out" | head -n1 || true)"
+  ans_cnt="$(awk -F'[, ]+' '/^;; flags:/{for(i=1;i<=NF;i++) if($i=="ANSWER:"){print $(i+1); exit}}' <<<"$out" 2>/dev/null || true)"
+  qtime="$(awk '/^;; Query time:/{print $4; exit}' <<<"$out" 2>/dev/null || true)"
+
+  # Prefer explicit status if available
   case "${status:-}" in
-    NOERROR)  echo "OK qtime_ms=${qtime:-NA} status=NOERROR" ;;
-    NXDOMAIN) echo "NXDOMAIN qtime_ms=${qtime:-NA} status=NXDOMAIN" ;;
-    SERVFAIL) echo "SERVFAIL qtime_ms=${qtime:-NA} status=SERVFAIL" ;;
-    REFUSED)  echo "REFUSED qtime_ms=${qtime:-NA} status=REFUSED" ;;
-    *)        echo "UNKNOWN qtime_ms=${qtime:-NA} status=${status:-NA}" ;;
+    NOERROR)  echo "OK qtime_ms=${qtime:-NA} status=NOERROR"; return 0 ;;
+    NXDOMAIN) echo "NXDOMAIN qtime_ms=${qtime:-NA} status=NXDOMAIN"; return 0 ;;
+    SERVFAIL) echo "SERVFAIL qtime_ms=${qtime:-NA} status=SERVFAIL"; return 0 ;;
+    REFUSED)  echo "REFUSED qtime_ms=${qtime:-NA} status=REFUSED"; return 0 ;;
   esac
+
+  # If status missing/unexpected, fall back to ANSWER count
+  if [[ "${ans_cnt:-}" =~ ^[0-9]+$ ]] && (( ans_cnt > 0 )); then
+    echo "OK qtime_ms=${qtime:-NA} status=NOERROR"
+    return 0
+  fi
+
+  echo "UNKNOWN qtime_ms=${qtime:-NA} status=${status:-NA}"
+  return 0
 }
+
 
 dnssec_note_local() {
   local out
