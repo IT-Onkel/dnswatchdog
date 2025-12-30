@@ -1,0 +1,9 @@
+/var/log/dns_watchdog_detail.log /var/log/dns_watchdog_summary.log {
+  daily
+  rotate 14
+  missingok
+  notifempty
+  compress
+  delaycompress
+  copytruncate
+}
